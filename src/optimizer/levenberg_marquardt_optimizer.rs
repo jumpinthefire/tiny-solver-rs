@@ -67,6 +67,8 @@ impl optimizer::Optimizer for LevenbergMarquardtOptimizer {
         // With LM, rather than solving A * dx = b for dx, we solve for (A + lambda * diag(A)) dx = b.
         let mut jacobi_scaling_diagonal: Option<faer::sparse::SparseColMat<usize, f64>> = None;
 
+        let s = problem.get_symbolic_structure(&parameter_blocks, &total_variable_dimension, &variable_name_to_col_idx_dict);
+
         // Damping parameter (a.k.a lambda / Marquardt parameter)
         let mut u = 1.0 / self.initial_trust_region_radius;
 
@@ -76,6 +78,7 @@ impl optimizer::Optimizer for LevenbergMarquardtOptimizer {
                 &parameter_blocks,
                 &variable_name_to_col_idx_dict,
                 total_variable_dimension,
+                &s
             );
 
             if i == 0 {

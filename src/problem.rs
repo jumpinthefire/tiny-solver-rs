@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use faer::sparse::SparseColMat;
+use faer::sparse::{SparseColMat, SymbolicSparseColMat, ValuesOrder};
 use faer_ext::IntoFaer;
 use nalgebra as na;
 use rayon::prelude::*;
@@ -24,8 +24,13 @@ impl Default for Problem {
     }
 }
 
+pub struct SymbolicStructure {
+    pattern: SymbolicSparseColMat<usize>,
+    order: ValuesOrder<usize>
+}
+
 /// (col idx in matrix, row idx in matrix, value)
-type JacobianValue = (usize, usize, f64);
+type JacobianValue = f64;
 
 impl Problem {
     pub fn new() -> Problem {
@@ -37,6 +42,43 @@ impl Problem {
             variable_bounds: HashMap::new(),
             variable_manifold: HashMap::new(),
         }
+    }
+
+    pub fn get_symbolic_structure(
+        &self,
+        parameter_blocks: &HashMap<String, ParameterBlock>,
+        total_variable_dimension: &usize,
+        variable_name_to_col_idx_dict: &HashMap<String, usize>
+    ) -> SymbolicStructure {
+        let mut indices = Vec::<(usize, usize)>::new();
+        //let mut total_rows = self.residual_blocks.iter().map(|(_, rb)| { rb.dim_residual}).sum();
+        let mut total_cols = 0;
+
+        self.residual_blocks.iter().for_each(|(_, residual_block)| {
+            let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
+            let mut count_variable_local_idx: usize = 0;
+            for var_key in &residual_block.variable_key_list {
+                if let Some(param) = parameter_blocks.get(var_key) {
+                    variable_local_idx_size_list.push((count_variable_local_idx, param.tangent_size()));
+                    count_variable_local_idx += param.tangent_size();
+                };
+            }
+            for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
+                if let Some(variable_global_idx) = variable_name_to_col_idx_dict.get(var_key) {
+                    let (_, var_size) = variable_local_idx_size_list[i];
+                    for row_idx in 0..residual_block.dim_residual {
+                        for col_idx in 0..var_size {
+                            let global_row_idx = residual_block.residual_row_start_idx + row_idx;
+                            let global_col_idx = variable_global_idx + col_idx;
+                            indices.push((global_row_idx, global_col_idx));
+                        }
+                    }
+                }
+            }
+        });
+
+        let (s, o) = SymbolicSparseColMat::try_new_from_indices(self.total_residual_dimension, *total_variable_dimension, &indices).unwrap();
+        return SymbolicStructure { pattern : s, order: o};
     }
 
     pub fn get_variable_name_to_col_idx_dict(
@@ -148,7 +190,7 @@ impl Problem {
             self.total_residual_dimension,
         )));
         self.residual_blocks
-            .par_iter()
+            .iter()
             .for_each(|(_, residual_block)| {
                 self.compute_residual_impl(
                     residual_block,
@@ -170,6 +212,7 @@ impl Problem {
         parameter_blocks: &HashMap<String, ParameterBlock>,
         variable_name_to_col_idx_dict: &HashMap<String, usize>,
         total_variable_dimension: usize,
+        symbolic_structure: &SymbolicStructure
     ) -> (faer::Mat<f64>, SparseColMat<usize, f64>) {
         // multi
         let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
@@ -177,8 +220,9 @@ impl Problem {
         )));
         let jacobian_list = Arc::new(Mutex::new(Vec::<JacobianValue>::new()));
 
+        let mut start = std::time::Instant::now();
         self.residual_blocks
-            .par_iter()
+            .iter()
             .for_each(|(_, residual_block)| {
                 self.compute_residual_and_jacobian_impl(
                     residual_block,
@@ -188,7 +232,8 @@ impl Problem {
                     &jacobian_list,
                 )
             });
-
+        log::debug!("compute_residual_and_jacobian_impl: {:?}", start.elapsed());
+        start = std::time::Instant::now();
         let total_residual = Arc::try_unwrap(total_residual)
             .unwrap()
             .into_inner()
@@ -199,13 +244,22 @@ impl Problem {
             .unwrap();
         // end
 
+        
         let residual_faer = total_residual.view_range(.., ..).into_faer().to_owned();
-        let jacobian_faer = SparseColMat::try_new_from_triplets(
+        log::debug!("residual_faer: {:?}", start.elapsed());
+        /*let jacobian_faer = SparseColMat::try_new_from_triplets(
             self.total_residual_dimension,
             total_variable_dimension,
             &jacobian_list,
         )
-        .unwrap();
+        .unwrap();*/
+
+        //let values : Vec<f64> = jacobian_list.iter().map(|j| j.2).collect();
+
+        let jacobian_faer = SparseColMat::new_from_order_and_values(symbolic_structure.pattern.clone(), &symbolic_structure.order, jacobian_list.as_slice()).unwrap();
+
+        log::debug!("jacobian_faer: {:?}, size of jac list: {:?}", start.elapsed(), jacobian_list.len());
+        log::debug!("rest of the function: {:?}", start.elapsed());
         (residual_faer, jacobian_faer)
     }
 
@@ -274,9 +328,11 @@ impl Problem {
                         let global_row_idx = residual_block.residual_row_start_idx + row_idx;
                         let global_col_idx = variable_global_idx + col_idx;
                         let value = variable_jac[(row_idx, col_idx)];
-                        local_jacobian_list.push((global_row_idx, global_col_idx, value));
+                        local_jacobian_list.push(value);
                     }
                 }
+               // log::debug!("Hossam: {}, {}", jac.shape().0, var_size);
+
                 let mut jacobian_list = jacobian_list.lock().unwrap();
                 jacobian_list.extend(local_jacobian_list);
             }

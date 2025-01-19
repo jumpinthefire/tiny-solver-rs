@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use nalgebra as na;
 use rayon::prelude::*;
 
@@ -84,6 +86,7 @@ impl ResidualBlock {
 
         // tangent size
         let residual_with_jacobian = self.factor.residual_func_dual(&params_plus_tangent_dual);
+       // log::debug!("Duration of residual_func_dual: {:?} secs", (start.elapsed()).as_millis());
         let mut residual = residual_with_jacobian.map(|x| x.re);
         let jacobian = residual_with_jacobian
             .map(|x| x.eps.unwrap_generic(na::Dyn(dim_variable), na::Const::<1>));
